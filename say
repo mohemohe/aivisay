@@ -1,0 +1,334 @@
+#!/bin/bash -x
+
+# Script name for help
+SCRIPT_NAME=$(basename "$0")
+
+# Configuration
+AIVIS_SOURCE=${AIVIS_SOURCE:-local}  # "local" or "cloud"
+
+# Local AivisSpeech Engine configuration
+LOCAL_BASE_URL=${AIVISSPEECH_URL:-http://localhost:10101}
+LOCAL_SPEAKER_ID=${AIVISSPEECH_SPEAKER:-888753760}
+
+# Aivis Cloud API configuration
+CLOUD_BASE_URL=${AIVIS_CLOUD_URL:-https://api.aivis-project.com}
+CLOUD_API_KEY=${AIVIS_CLOUD_API_KEY:-}
+CLOUD_MODEL_UUID=${AIVIS_CLOUD_MODEL_UUID:-a59cb814-0083-4369-8542-f51a29e72af7}
+
+# Common parameters
+SPEED=${AIVISSPEECH_SPEED:-1.0}
+PITCH=${AIVISSPEECH_PITCH:-0.0}
+VOLUME=${AIVISSPEECH_VOLUME:-1.0}
+
+# Cache configuration
+CACHE_ENABLED=false
+CACHE_BASE_DIR=${AIVIS_CACHE_DIR:-~/.cache/aivisay}
+
+#=====================================
+
+function _exit() {
+  exit 1
+}
+
+trap '_exit' {1,2,3,15}
+
+# Show help
+function show_help() {
+  cat << EOF
+Usage: $SCRIPT_NAME [OPTIONS] [TEXT]
+
+Convert text to speech using AivisSpeech Engine or Aivis Cloud API.
+
+Options:
+  --help    Show this help message
+  --cache   Enable caching (saves audio files for faster playback)
+
+Examples:
+  $SCRIPT_NAME "Hello, world"
+  echo "Hello" | $SCRIPT_NAME
+  $SCRIPT_NAME --cache "Cached message"
+
+Environment:
+  AIVIS_SOURCE         API mode: 'local' or 'cloud' (default: local)
+  AIVIS_CACHE_DIR      Cache directory (default: ~/.cache/aivisay)
+
+For more options, see: https://github.com/mohemohe/aivisay
+EOF
+  exit 0
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --help)
+      show_help
+      ;;
+    --cache)
+      CACHE_ENABLED=true
+      shift
+      ;;
+    -*)
+      echo "Error: Unknown option: $1" >&2
+      echo "Use --help for usage information" >&2
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+# Check required commands
+for cmd in curl jq play; do
+  if ! command -v $cmd &>/dev/null; then
+    echo "Error: Required command '$cmd' not found" >&2
+    echo "Please install it first:" >&2
+    case $cmd in
+    jq) echo "  brew install jq" >&2 ;;
+    play) echo "  brew install sox" >&2 ;;
+    esac
+    exit 1
+  fi
+done
+
+# Test connection based on API mode
+if [ "$AIVIS_SOURCE" = "local" ]; then
+  if ! curl -s --connect-timeout 3 "${LOCAL_BASE_URL}/speakers" &>/dev/null; then
+    echo "Error: Cannot connect to AivisSpeech Engine at ${LOCAL_BASE_URL}" >&2
+    echo "Make sure AivisSpeech Engine is running" >&2
+    exit 1
+  fi
+elif [ "$AIVIS_SOURCE" = "cloud" ]; then
+  if [ -z "$CLOUD_API_KEY" ]; then
+    echo "Error: AIVIS_CLOUD_API_KEY is not set" >&2
+    echo "Please set your API key with: export AIVIS_CLOUD_API_KEY=your_api_key" >&2
+    exit 1
+  fi
+  if [ -z "$CLOUD_MODEL_UUID" ]; then
+    echo "Error: AIVIS_CLOUD_MODEL_UUID is not set" >&2
+    echo "Please set your model UUID with: export AIVIS_CLOUD_MODEL_UUID=your_model_uuid" >&2
+    exit 1
+  fi
+else
+  echo "Error: Invalid AIVIS_SOURCE. Use 'local' or 'cloud'" >&2
+  exit 1
+fi
+
+# Get input text
+if [ -p /dev/stdin ]; then
+  message=$(cat -)
+else
+  # Remaining arguments after option parsing
+  message="$*"
+fi
+
+# Check if message is empty
+if [ -z "$message" ]; then
+  echo "Error: No text provided" >&2
+  echo "Usage: say \"text to speak\"" >&2
+  echo "   or: echo \"text\" | say" >&2
+  exit 1
+fi
+
+# Cache helper functions
+function get_cache_dir() {
+  local cache_base=$(eval echo "$CACHE_BASE_DIR")
+  local subdir=""
+  
+  if [ "$AIVIS_SOURCE" = "local" ]; then
+    subdir="$LOCAL_SPEAKER_ID"
+  else
+    subdir="$CLOUD_MODEL_UUID"
+  fi
+  
+  echo "${cache_base}/${subdir}"
+}
+
+function get_cache_filename() {
+  local text="$1"
+  local hash=""
+  
+  # Use sha256sum if available, otherwise use shasum -a 256 (macOS)
+  if command -v sha256sum &>/dev/null; then
+    hash=$(echo -n "$text" | sha256sum | cut -d' ' -f1)
+  else
+    hash=$(echo -n "$text" | shasum -a 256 | cut -d' ' -f1)
+  fi
+  
+  local ext="wav"
+  
+  if [ "$AIVIS_SOURCE" = "cloud" ]; then
+    ext="mp3"
+  fi
+  
+  echo "${hash}.${ext}"
+}
+
+function check_cache() {
+  local text="$1"
+  local cache_dir=$(get_cache_dir)
+  local filename=$(get_cache_filename "$text")
+  local filepath="${cache_dir}/${filename}"
+  
+  if [ -f "$filepath" ]; then
+    echo "$filepath"
+    return 0
+  fi
+  
+  return 1
+}
+
+function save_to_cache() {
+  local text="$1"
+  # Audio data is passed via stdin
+  local cache_dir=$(get_cache_dir)
+  local filename=$(get_cache_filename "$text")
+  local filepath="${cache_dir}/${filename}"
+  
+  # Create cache directory if it doesn't exist
+  mkdir -p "$cache_dir"
+  
+  # Save audio data to file (from stdin)
+  cat > "$filepath"
+}
+
+# Local TTS function using AivisSpeech Engine
+function tts_local() {
+  local text="$1"
+  
+  # Check cache first if enabled
+  if [ "$CACHE_ENABLED" = true ]; then
+    local cached_file
+    cached_file=$(check_cache "$text")
+    if [ $? -eq 0 ] && [ -n "$cached_file" ]; then
+      play -q "$cached_file" 2>/dev/null
+      return $?
+    fi
+  fi
+  
+  # Step 1: Create audio query
+  local audio_query=$(curl -s -w "\n%{http_code}" \
+    "${LOCAL_BASE_URL}/audio_query?speaker=${LOCAL_SPEAKER_ID}" \
+    -X POST \
+    --get \
+    --data-urlencode "text=${text}")
+
+  local http_code=$(echo "$audio_query" | tail -n1)
+  audio_query=$(echo "$audio_query" | sed '$d')
+
+  # Check if audio query was successful
+  if [ "$http_code" != "200" ] || [ -z "$audio_query" ]; then
+    echo "Error: Failed to create audio query (HTTP $http_code)" >&2
+    return 1
+  fi
+
+  # Step 2: Modify audio query parameters if needed
+  local modified_query=$(echo "$audio_query" | jq \
+    --arg speed "$SPEED" \
+    --arg pitch "$PITCH" \
+    --arg volume "$VOLUME" \
+    '.speedScale = ($speed | tonumber) | .pitchScale = ($pitch | tonumber) | .volumeScale = ($volume | tonumber)')
+
+  # Check if jq processing was successful
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to modify audio query" >&2
+    return 1
+  fi
+
+  # Step 3: Synthesize speech
+  if [ "$CACHE_ENABLED" = true ]; then
+    # Save to cache and play
+    curl -s -f \
+      "${LOCAL_BASE_URL}/synthesis?speaker=${LOCAL_SPEAKER_ID}" \
+      -X POST \
+      -H "Content-Type: application/json" \
+      -d "$modified_query" | tee >(save_to_cache "$text") | play -q -t wav - 2>/dev/null
+  else
+    # Just play without caching
+    curl -s -f \
+      "${LOCAL_BASE_URL}/synthesis?speaker=${LOCAL_SPEAKER_ID}" \
+      -X POST \
+      -H "Content-Type: application/json" \
+      -d "$modified_query" | play -q -t wav - 2>/dev/null
+  fi
+  
+  if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    echo "Error: Failed to synthesize audio" >&2
+    return 1
+  fi
+  
+  return 0
+}
+
+# Cloud TTS function using Aivis Cloud API
+function tts_cloud() {
+  local text="$1"
+  
+  # Check cache first if enabled
+  if [ "$CACHE_ENABLED" = true ]; then
+    local cached_file
+    cached_file=$(check_cache "$text")
+    if [ $? -eq 0 ] && [ -n "$cached_file" ]; then
+      play -q "$cached_file" 2>/dev/null
+      return $?
+    fi
+  fi
+  
+  # Create request body
+  local request_body=$(jq -n \
+    --arg text "$text" \
+    --arg model "$CLOUD_MODEL_UUID" \
+    '{
+      "model_uuid": $model,
+      "text": $text,
+      "use_ssml": false,
+      "output_format": "mp3"
+    }')
+  
+  # Call Aivis Cloud API
+  if [ "$CACHE_ENABLED" = true ]; then
+    # Save to cache and play
+    curl -s -f \
+      "${CLOUD_BASE_URL}/v1/tts/synthesize" \
+      -X POST \
+      -H "Authorization: Bearer ${CLOUD_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d "$request_body" | tee >(save_to_cache "$text") | play -q -t mp3 - 2>/dev/null
+  else
+    # Just play without caching
+    curl -s -f \
+      "${CLOUD_BASE_URL}/v1/tts/synthesize" \
+      -X POST \
+      -H "Authorization: Bearer ${CLOUD_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d "$request_body" | play -q -t mp3 - 2>/dev/null
+  fi
+  
+  if [ ${PIPESTATUS[0]} -ne 0 ]; then
+    echo "Error: Failed to synthesize audio" >&2
+    return 1
+  fi
+  
+  return 0
+}
+
+# Process each line
+while IFS= read -r line; do
+  # Skip empty lines
+  if [ -z "$line" ]; then
+    sleep 0.3
+    continue
+  fi
+
+  echo "$line"
+
+  # Call appropriate TTS function based on API mode
+  if [ "$AIVIS_SOURCE" = "local" ]; then
+    tts_local "$line"
+  else
+    tts_cloud "$line"
+  fi
+
+  sleep 0.3
+
+done <<<"$message"

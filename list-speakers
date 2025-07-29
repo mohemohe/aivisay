@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# AivisSpeech Engine configuration
+BASE_URL=${AIVISSPEECH_URL:-http://localhost:10101}
+
+# Check required commands
+if ! command -v jq &> /dev/null; then
+  echo "Error: jq is required. Install with: brew install jq" >&2
+  exit 1
+fi
+
+# Get speakers list
+echo "Fetching available speakers from ${BASE_URL}..."
+speakers=$(curl -s "${BASE_URL}/speakers")
+
+if [ -z "$speakers" ]; then
+  echo "Error: Failed to fetch speakers" >&2
+  exit 1
+fi
+
+# Check if a specific speaker UUID was provided
+if [ -n "$1" ]; then
+  # Show specific speaker details
+  echo
+  echo "Speaker details for UUID: $1"
+  echo "=============================="
+  echo "$speakers" | jq -r --arg uuid "$1" '.[] | select(.speaker_uuid == $uuid) | 
+    "Name: \(.name)",
+    "Model UUID: \(.speaker_uuid)",
+    "",
+    "Available styles:",
+    (.styles[] | "  • \(.name) (Speaker ID: \(.id), Type: \(.type))")' 2>/dev/null
+  
+  if [ ${PIPESTATUS[1]} -ne 0 ]; then
+    echo "Speaker with UUID $1 not found" >&2
+    exit 1
+  fi
+else
+  # Display all speakers with their styles
+  echo
+  echo "Available speakers and styles:"
+  echo "=============================="
+  echo "$speakers" | jq -r '.[] | 
+    "■ \(.name) (Model UUID: \(.speaker_uuid))",
+    (.styles[] | "  └─ \(.name) (Speaker ID: \(.id), Type: \(.type))")' 2>/dev/null || \
+  echo "$speakers" | jq '.'
+
+  echo
+  echo "Tip: Use './list-speakers <MODEL_UUID>' to see details for a specific speaker"
+fi
