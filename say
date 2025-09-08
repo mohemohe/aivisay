@@ -319,23 +319,173 @@ function tts_cloud() {
   return 0
 }
 
-# Process each line
-while IFS= read -r line; do
-  # Skip empty lines
-  if [ -z "$line" ]; then
+# Split text into sentences by punctuation marks
+function split_sentences() {
+  local text="$1"
+  
+  # Replace sentence-ending punctuation with newlines
+  # Preserve the punctuation marks at the end of each sentence
+  echo "$text" | sed -E 's/([。！？!?．])/\1\n/g' | while IFS= read -r line; do
+    # Skip empty lines
+    if [ -n "$line" ]; then
+      echo "$line"
+    fi
+  done
+}
+
+# Global variables for pipe management
+declare -a PIPE_LIST=()
+
+# Cleanup function for Named Pipes
+function cleanup_pipes() {
+  for pipe in "${PIPE_LIST[@]}"; do
+    if [ -p "$pipe" ]; then
+      rm -f "$pipe"
+    fi
+  done
+  PIPE_LIST=()
+}
+
+# Enhanced exit function
+function _exit() {
+  cleanup_pipes
+  exit 1
+}
+
+# Streaming TTS function with parallel processing
+function streaming_tts() {
+  local text="$1"
+  
+  # Split text into sentences
+  local sentences=()
+  while IFS= read -r sentence; do
+    sentences+=("$sentence")
+  done < <(split_sentences "$text")
+  
+  local sentence_count=${#sentences[@]}
+  
+  if [ $sentence_count -eq 0 ]; then
+    return 0
+  fi
+  
+  # For single sentence, just use regular TTS
+  if [ $sentence_count -eq 1 ]; then
+    echo "${sentences[0]}"
+    if [ "$AIVIS_SOURCE" = "local" ]; then
+      tts_local "${sentences[0]}"
+    else
+      tts_cloud "${sentences[0]}"
+    fi
+    return $?
+  fi
+  
+  # For multiple sentences, use background processing with temporary files
+  # This approach is safer than Named Pipes for cross-platform compatibility
+  local temp_dir=$(mktemp -d)
+  local background_pid=""
+  
+  for ((i=0; i<sentence_count; i++)); do
+    local sentence="${sentences[i]}"
+    echo "$sentence"
+    
+    # Generate next sentence in background if not last iteration
+    if [ $i -lt $((sentence_count - 1)) ]; then
+      local next_sentence="${sentences[$((i + 1))]}"
+      local next_temp_file="${temp_dir}/next_${i}.audio"
+      
+      # Start background TTS generation for next sentence
+      (
+        if [ "$AIVIS_SOURCE" = "local" ]; then
+          # Get audio query
+          local audio_query=$(curl -s -w "\n%{http_code}" \
+            "${LOCAL_BASE_URL}/audio_query?speaker=${LOCAL_SPEAKER_ID}" \
+            -X POST \
+            --get \
+            --data-urlencode "text=${next_sentence}" 2>/dev/null)
+          
+          local http_code=$(echo "$audio_query" | tail -n1)
+          audio_query=$(echo "$audio_query" | sed '$d')
+          
+          if [ "$http_code" = "200" ] && [ -n "$audio_query" ]; then
+            local modified_query=$(echo "$audio_query" | jq \
+              --arg speed "$SPEED" \
+              --arg pitch "$PITCH" \
+              --arg volume "$VOLUME" \
+              '.speedScale = ($speed | tonumber) | .pitchScale = ($pitch | tonumber) | .volumeScale = ($volume | tonumber)' 2>/dev/null)
+            
+            if [ $? -eq 0 ]; then
+              curl -s -f \
+                "${LOCAL_BASE_URL}/synthesis?speaker=${LOCAL_SPEAKER_ID}" \
+                -X POST \
+                -H "Content-Type: application/json" \
+                -d "$modified_query" > "$next_temp_file" 2>/dev/null
+            fi
+          fi
+        else
+          # Cloud TTS
+          local request_body=$(jq -n \
+            --arg text "$next_sentence" \
+            --arg model "$CLOUD_MODEL_UUID" \
+            '{
+              "model_uuid": $model,
+              "text": $text,
+              "use_ssml": false,
+              "output_format": "mp3"
+            }' 2>/dev/null)
+          
+          curl -s -f \
+            "${CLOUD_BASE_URL}/v1/tts/synthesize" \
+            -X POST \
+            -H "Authorization: Bearer ${CLOUD_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$request_body" > "$next_temp_file" 2>/dev/null
+        fi
+      ) &
+      background_pid=$!
+    fi
+    
+    # Play current sentence
+    if [ $i -eq 0 ]; then
+      # First sentence - generate and play immediately
+      if [ "$AIVIS_SOURCE" = "local" ]; then
+        tts_local "$sentence"
+      else
+        tts_cloud "$sentence"
+      fi
+    else
+      # Play from pre-generated temp file
+      local current_temp_file="${temp_dir}/next_$((i-1)).audio"
+      if [ -f "$current_temp_file" ]; then
+        local audio_format="wav"
+        if [ "$AIVIS_SOURCE" = "cloud" ]; then
+          audio_format="mp3"
+        fi
+        play -q -t "$audio_format" "$current_temp_file" 2>/dev/null
+        rm -f "$current_temp_file"
+      else
+        # Fallback: generate immediately if background failed
+        if [ "$AIVIS_SOURCE" = "local" ]; then
+          tts_local "$sentence"
+        else
+          tts_cloud "$sentence"
+        fi
+      fi
+    fi
+    
+    # Wait for background process if it exists
+    if [ -n "$background_pid" ]; then
+      wait $background_pid 2>/dev/null
+      background_pid=""
+    fi
+    
     sleep "$SLEEP_TIME"
-    continue
-  fi
+  done
+  
+  # Clean up temp directory
+  rm -rf "$temp_dir"
+  
+  return 0
+}
 
-  echo "$line"
-
-  # Call appropriate TTS function based on API mode
-  if [ "$AIVIS_SOURCE" = "local" ]; then
-    tts_local "$line"
-  else
-    tts_cloud "$line"
-  fi
-
-  sleep "$SLEEP_TIME"
-
-done <<<"$message"
+# Process input with streaming TTS
+streaming_tts "$message"
