@@ -1,0 +1,105 @@
+#!/bin/bash
+
+# Script name for help
+SCRIPT_NAME=$(basename "$0")
+
+# Configuration
+BASE_URL=${AIVISSPEECH_URL:-http://localhost:10101}
+
+# Show help
+function show_help() {
+  echo "Usage: ${SCRIPT_NAME} --file <path_to_aivmx_file>"
+  echo ""
+  echo "Upload a local AIVMX model file to AivisSpeech Engine"
+  echo ""
+  echo "Options:"
+  echo "  --file PATH    Path to the AIVMX file to upload"
+  echo "  -h, --help     Show this help message"
+  echo ""
+  echo "Environment variables:"
+  echo "  AIVISSPEECH_URL    Base URL for AivisSpeech Engine (default: http://localhost:10101)"
+  echo ""
+  echo "Examples:"
+  echo "  ${SCRIPT_NAME} --file ./model.aivmx"
+  echo "  ${SCRIPT_NAME} --file /path/to/your/model.aivmx"
+}
+
+# Check required commands
+if ! command -v curl &> /dev/null; then
+  echo "Error: curl is required" >&2
+  exit 1
+fi
+
+# Parse command line arguments
+FILE_PATH=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --file)
+      FILE_PATH="$2"
+      shift 2
+      ;;
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    *)
+      echo "Error: Unknown option $1" >&2
+      show_help
+      exit 1
+      ;;
+  esac
+done
+
+# Check if file path is provided
+if [ -z "$FILE_PATH" ]; then
+  echo "Error: --file parameter is required" >&2
+  show_help
+  exit 1
+fi
+
+# Check if file exists
+if [ ! -f "$FILE_PATH" ]; then
+  echo "Error: File not found: $FILE_PATH" >&2
+  exit 1
+fi
+
+# Check if file has .aivmx extension
+if [[ ! "$FILE_PATH" =~ \.aivmx$ ]]; then
+  echo "Warning: File does not have .aivmx extension. Continuing anyway..."
+fi
+
+# Upload the model
+echo "Uploading model: $FILE_PATH"
+echo "Target URL: ${BASE_URL}/aivm_models/install"
+
+response=$(curl -s -w "\n%{http_code}" -X POST \
+  -F "file=@${FILE_PATH}" \
+  "${BASE_URL}/aivm_models/install")
+
+# Parse response
+http_code=$(echo "$response" | tail -n 1)
+response_body=$(echo "$response" | sed '$d')
+
+case $http_code in
+  204)
+    echo "✓ Model uploaded successfully!"
+    echo ""
+    echo "Note: You may need to load the model using the appropriate UUID."
+    echo "Use './list-speakers' to see available models and their UUIDs."
+    ;;
+  422)
+    echo "✗ Upload failed: Validation error" >&2
+    if [ -n "$response_body" ]; then
+      echo "Server response: $response_body" >&2
+    fi
+    exit 1
+    ;;
+  *)
+    echo "✗ Upload failed with HTTP code: $http_code" >&2
+    if [ -n "$response_body" ]; then
+      echo "Server response: $response_body" >&2
+    fi
+    exit 1
+    ;;
+esac

@@ -4,7 +4,7 @@
 SCRIPT_NAME=$(basename "$0")
 
 # Configuration
-AIVIS_SOURCE=${AIVIS_SOURCE:-local}  # "local" or "cloud"
+AIVIS_SOURCE=${AIVIS_SOURCE:-local} # "local" or "cloud"
 
 # Local AivisSpeech Engine configuration
 LOCAL_BASE_URL=${AIVISSPEECH_URL:-http://localhost:10101}
@@ -34,7 +34,7 @@ trap '_exit' {1,2,3,15}
 
 # Show help
 function show_help() {
-  cat << EOF
+  cat <<EOF
 Usage: $SCRIPT_NAME [OPTIONS] [TEXT]
 
 Convert text to speech using AivisSpeech Engine or Aivis Cloud API.
@@ -60,21 +60,21 @@ EOF
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --help)
-      show_help
-      ;;
-    --cache)
-      CACHE_ENABLED=true
-      shift
-      ;;
-    -*)
-      echo "Error: Unknown option: $1" >&2
-      echo "Use --help for usage information" >&2
-      exit 1
-      ;;
-    *)
-      break
-      ;;
+  --help)
+    show_help
+    ;;
+  --cache)
+    CACHE_ENABLED=true
+    shift
+    ;;
+  -*)
+    echo "Error: Unknown option: $1" >&2
+    echo "Use --help for usage information" >&2
+    exit 1
+    ;;
+  *)
+    break
+    ;;
   esac
 done
 
@@ -134,33 +134,33 @@ fi
 function get_cache_dir() {
   local cache_base=$(eval echo "$CACHE_BASE_DIR")
   local subdir=""
-  
+
   if [ "$AIVIS_SOURCE" = "local" ]; then
     subdir="$LOCAL_SPEAKER_ID"
   else
     subdir="$CLOUD_MODEL_UUID"
   fi
-  
+
   echo "${cache_base}/${subdir}"
 }
 
 function get_cache_filename() {
   local text="$1"
   local hash=""
-  
+
   # Use sha256sum if available, otherwise use shasum -a 256 (macOS)
   if command -v sha256sum &>/dev/null; then
     hash=$(echo -n "$text" | sha256sum | cut -d' ' -f1)
   else
     hash=$(echo -n "$text" | shasum -a 256 | cut -d' ' -f1)
   fi
-  
+
   local ext="wav"
-  
+
   if [ "$AIVIS_SOURCE" = "cloud" ]; then
     ext="mp3"
   fi
-  
+
   echo "${hash}.${ext}"
 }
 
@@ -169,12 +169,12 @@ function check_cache() {
   local cache_dir=$(get_cache_dir)
   local filename=$(get_cache_filename "$text")
   local filepath="${cache_dir}/${filename}"
-  
+
   if [ -f "$filepath" ]; then
     echo "$filepath"
     return 0
   fi
-  
+
   return 1
 }
 
@@ -184,18 +184,18 @@ function save_to_cache() {
   local cache_dir=$(get_cache_dir)
   local filename=$(get_cache_filename "$text")
   local filepath="${cache_dir}/${filename}"
-  
+
   # Create cache directory if it doesn't exist
   mkdir -p "$cache_dir"
-  
+
   # Save audio data to file (from stdin)
-  cat > "$filepath"
+  cat >"$filepath"
 }
 
 # Local TTS function using AivisSpeech Engine
 function tts_local() {
   local text="$1"
-  
+
   # Check cache first if enabled
   if [ "$CACHE_ENABLED" = true ]; then
     local cached_file
@@ -205,7 +205,7 @@ function tts_local() {
       return $?
     fi
   fi
-  
+
   # Step 1: Create audio query
   local audio_query=$(curl -s -w "\n%{http_code}" \
     "${LOCAL_BASE_URL}/audio_query?speaker=${LOCAL_SPEAKER_ID}" \
@@ -251,19 +251,19 @@ function tts_local() {
       -H "Content-Type: application/json" \
       -d "$modified_query" | play -q -t wav - 2>/dev/null
   fi
-  
+
   if [ ${PIPESTATUS[0]} -ne 0 ]; then
     echo "Error: Failed to synthesize audio" >&2
     return 1
   fi
-  
+
   return 0
 }
 
 # Cloud TTS function using Aivis Cloud API
 function tts_cloud() {
   local text="$1"
-  
+
   # Check cache first if enabled
   if [ "$CACHE_ENABLED" = true ]; then
     local cached_file
@@ -273,7 +273,7 @@ function tts_cloud() {
       return $?
     fi
   fi
-  
+
   # Create request body
   local request_body=$(jq -n \
     --arg text "$text" \
@@ -284,7 +284,7 @@ function tts_cloud() {
       "use_ssml": false,
       "output_format": "mp3"
     }')
-  
+
   # Call Aivis Cloud API
   if [ "$CACHE_ENABLED" = true ]; then
     # Save to cache and play
@@ -303,12 +303,12 @@ function tts_cloud() {
       -H "Content-Type: application/json" \
       -d "$request_body" | play -q -t mp3 - 2>/dev/null
   fi
-  
+
   if [ ${PIPESTATUS[0]} -ne 0 ]; then
     echo "Error: Failed to synthesize audio" >&2
     return 1
   fi
-  
+
   return 0
 }
 
