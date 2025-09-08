@@ -1,0 +1,131 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const { spawn } = require('child_process');
+
+process.env.AIVISSPEECH_SPEED = '1.2';
+
+async function summarizeWithGroq(inputText) {
+  if (!inputText) {
+    return '';
+  }
+
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) {
+    console.error('Error: GROQ_API_KEY not set');
+    return inputText;
+  }
+
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: 'openai/gpt-oss-120b',
+        messages: [
+          { role: 'system', content: '与えられたテキストを短く簡潔に要約してください。お淑やかな女性らしいスタイルの文章にしてください。' },
+          { role: 'user', content: inputText }
+        ]
+      })
+    });
+
+    const data = await response.json();
+    const summary = data.choices?.[0]?.message?.content;
+    
+    if (!summary) {
+      return inputText.split('\n')[0];
+    }
+    
+    return summary;
+  } catch (error) {
+    console.error('Error calling Groq API:', error);
+    return inputText.split('\n')[0];
+  }
+}
+
+function speakText(text) {
+  return new Promise((resolve, reject) => {
+    const say = spawn('say', [text]);
+    
+    say.on('close', (code) => {
+      if (code === 0) {
+        resolve(null);
+      } else {
+        reject(new Error(`say command exited with code ${code}`));
+      }
+    });
+    
+    say.on('error', (error) => {
+      reject(error);
+    });
+  });
+}
+
+async function main() {
+  try {
+    // Read JSON input from stdin
+    const input = await new Promise((resolve, reject) => {
+      let data = '';
+      process.stdin.on('data', chunk => data += chunk);
+      process.stdin.on('end', () => resolve(data));
+      process.stdin.on('error', reject);
+    });
+
+    const jsonData = JSON.parse(input);
+    // const stopHookActive = jsonData.stop_hook_active;
+    const transcriptPath = jsonData.transcript_path;
+
+    // Check if transcript path is provided
+    if (!transcriptPath || transcriptPath === 'null') {
+      console.log('Transcript path is not provided.');
+      process.exit(1);
+    }
+
+    // Check if the transcript file exists
+    if (!fs.existsSync(transcriptPath)) {
+      console.log(`Transcript file does not exist: ${transcriptPath}`);
+      process.exit(1);
+    }
+
+    // Read the transcript json file and get the last entry
+    const transcriptContent = fs.readFileSync(transcriptPath, 'utf8');
+    const lines = transcriptContent.trim().split('\n');
+    const lastTranscriptJson = JSON.parse(lines[lines.length - 1]);
+
+    // Extract text content
+    const contentArray = lastTranscriptJson.message?.content || [];
+    const textContents = contentArray
+      .filter(item => item.text)
+      .map(item => item.text)
+      .join('\n');
+
+    if (!textContents) {
+      console.log('No text content found in transcript.');
+      process.exit(1);
+    }
+
+    const textLines = textContents.split('\n');
+    const firstLine = textLines[0];
+    const inputText = textLines.slice(1).join('\n');
+
+    let ttsText;
+    if (inputText.trim()) {
+      const summary = await summarizeWithGroq(inputText);
+      ttsText = `${firstLine}。${summary}`;
+    } else {
+      ttsText = firstLine;
+    }
+
+    // Speak the text
+    await speakText(ttsText);
+
+  } catch (error) {
+    console.error('Error:', error.message);
+    process.exit(1);
+  }
+}
+
+main();

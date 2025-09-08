@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:aivis-project.github.io)"
+      "WebFetch(domain:aivis-project.github.io)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []

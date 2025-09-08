@@ -18,6 +18,31 @@ AivisSpeech Engine またはAivis Cloud APIを使用したコマンドラインT
 
 ## インストール
 
+### go版（推奨）
+
+そのままスクリプトライクに実行できます。
+
+```bash
+chmod +x say.go
+```
+
+パスの通った場所に配置するか、エイリアスを設定してください：
+
+```bash
+# ~/.bashrc または ~/.zshrc に追加
+alias say='/path/to/aivisay/say.go'
+```
+
+事前にビルドすると起動が速くなります。
+
+```bash
+make build
+# ~/.bashrc または ~/.zshrc に追加
+alias say='/path/to/aivisay/say-go'
+```
+
+### bash版
+
 ```bash
 chmod +x say
 ```
@@ -28,6 +53,8 @@ chmod +x say
 # ~/.bashrc または ~/.zshrc に追加
 alias say='/path/to/aivisay/say'
 ```
+
+### 備考
 
 macOSでパスが通った場所に配置する場合は、標準の `say` コマンドよりも優先して読み込まれる場所に配置してください。
 
