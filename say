@@ -1,5 +1,9 @@
 #!/bin/bash
 
+if [[ "${AIVIS_DEBUG}" == "1" ]];then
+  set -x;
+fi
+
 # Script name for help
 SCRIPT_NAME=$(basename "$0")
 
@@ -23,6 +27,9 @@ VOLUME=${AIVISSPEECH_VOLUME:-1.0}
 # Cache configuration
 CACHE_ENABLED=false
 CACHE_BASE_DIR=${AIVIS_CACHE_DIR:-~/.cache/aivisay}
+
+# Sleep configuration
+SLEEP_TIME=${AIVIS_SLEEP:-0.3}
 
 #=====================================
 
@@ -316,7 +323,7 @@ function tts_cloud() {
 while IFS= read -r line; do
   # Skip empty lines
   if [ -z "$line" ]; then
-    sleep 0.3
+    sleep "$SLEEP_TIME"
     continue
   fi
 
@@ -329,6 +336,6 @@ while IFS= read -r line; do
     tts_cloud "$line"
   fi
 
-  sleep 0.3
+  sleep "$SLEEP_TIME"
 
 done <<<"$message"
