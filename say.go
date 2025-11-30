@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,8 +21,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ebitengine/oto/v3"
 )
 
 // Configuration
@@ -37,6 +41,7 @@ type Config struct {
 	Volume    float64
 	CacheDir  string
 	SleepTime time.Duration
+	UseOto    bool
 	Debug     bool
 }
 
@@ -56,6 +61,123 @@ type CloudRequest struct {
 	OutputFormat string `json:"output_format"`
 }
 
+// WAV header structure
+type WAVHeader struct {
+	SampleRate    uint32
+	NumChannels   uint16
+	BitsPerSample uint16
+	DataOffset    int
+	DataSize      int
+}
+
+// Global oto context (must be created only once)
+var (
+	otoContext     *oto.Context
+	otoContextOnce sync.Once
+	otoContextErr  error
+)
+
+// parseWAVHeader parses WAV file header and returns audio parameters
+func parseWAVHeader(data []byte) (*WAVHeader, error) {
+	if len(data) < 44 {
+		return nil, fmt.Errorf("data too short for WAV header")
+	}
+
+	// Check RIFF header
+	if string(data[0:4]) != "RIFF" {
+		return nil, fmt.Errorf("not a RIFF file")
+	}
+
+	// Check WAVE format
+	if string(data[8:12]) != "WAVE" {
+		return nil, fmt.Errorf("not a WAVE file")
+	}
+
+	header := &WAVHeader{}
+
+	// Find fmt chunk
+	offset := 12
+	for offset < len(data)-8 {
+		chunkID := string(data[offset : offset+4])
+		chunkSize := int(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+
+		if chunkID == "fmt " {
+			if offset+24 > len(data) {
+				return nil, fmt.Errorf("fmt chunk too short")
+			}
+			header.NumChannels = binary.LittleEndian.Uint16(data[offset+10 : offset+12])
+			header.SampleRate = binary.LittleEndian.Uint32(data[offset+12 : offset+16])
+			header.BitsPerSample = binary.LittleEndian.Uint16(data[offset+22 : offset+24])
+		} else if chunkID == "data" {
+			header.DataOffset = offset + 8
+			header.DataSize = chunkSize
+			break
+		}
+
+		offset += 8 + chunkSize
+		// Align to even boundary
+		if chunkSize%2 == 1 {
+			offset++
+		}
+	}
+
+	if header.DataOffset == 0 {
+		return nil, fmt.Errorf("data chunk not found")
+	}
+
+	return header, nil
+}
+
+// getOtoContext returns the global oto context, creating it if necessary
+func getOtoContext() (*oto.Context, error) {
+	otoContextOnce.Do(func() {
+		op := &oto.NewContextOptions{
+			SampleRate:   44100,
+			ChannelCount: 1,
+			Format:       oto.FormatSignedInt16LE,
+		}
+
+		var readyChan chan struct{}
+		otoContext, readyChan, otoContextErr = oto.NewContext(op)
+		if otoContextErr != nil {
+			return
+		}
+
+		<-readyChan
+	})
+
+	return otoContext, otoContextErr
+}
+
+// playAudioWithOto plays WAV audio data using oto library
+func playAudioWithOto(audioData []byte) error {
+	header, err := parseWAVHeader(audioData)
+	if err != nil {
+		return fmt.Errorf("failed to parse WAV header: %v", err)
+	}
+
+	ctx, err := getOtoContext()
+	if err != nil {
+		return fmt.Errorf("failed to get oto context: %v", err)
+	}
+
+	// Extract PCM data (skip WAV header)
+	pcmData := audioData[header.DataOffset:]
+	if len(pcmData) > header.DataSize {
+		pcmData = pcmData[:header.DataSize]
+	}
+
+	player := ctx.NewPlayer(bytes.NewReader(pcmData))
+
+	player.Play()
+
+	for player.IsPlaying() {
+		time.Sleep(time.Millisecond)
+	}
+
+	return nil
+}
+
 func getConfig() *Config {
 	cfg := &Config{
 		Source:    getEnv("AIVIS_SOURCE", "local"),
@@ -69,6 +191,7 @@ func getConfig() *Config {
 		Volume:    getEnvFloat("AIVISSPEECH_VOLUME", 1.0),
 		CacheDir:  getEnv("AIVIS_CACHE_DIR", filepath.Join(os.Getenv("HOME"), ".cache", "aivisay")),
 		SleepTime: time.Duration(getEnvFloat("AIVIS_SLEEP", 0.3)*1000) * time.Millisecond,
+		UseOto:    getEnv("AIVIS_USE_OTO", "1") == "1",
 		Debug:     getEnv("AIVIS_DEBUG", "") == "1",
 	}
 	return cfg
@@ -305,7 +428,12 @@ func generateAudio(cfg *Config, text string, cacheEnabled bool) ([]byte, error) 
 	return audioData, nil
 }
 
-func playAudio(audioData []byte, format string) error {
+func playAudio(cfg *Config, audioData []byte, format string) error {
+	// Use oto for local mode (WAV), use external play command for cloud mode (MP3)
+	if cfg.Source == "local" && cfg.UseOto && format == "wav" {
+		return playAudioWithOto(audioData)
+	}
+
 	cmd := exec.Command("play", "-q", "-t", format, "-")
 	cmd.Stdin = bytes.NewReader(audioData)
 	cmd.Stderr = os.Stderr
@@ -356,7 +484,7 @@ func streamingTTS(cfg *Config, text string, cacheEnabled bool) error {
 			format = "mp3"
 		}
 
-		return playAudio(audioData, format)
+		return playAudio(cfg, audioData, format)
 	}
 
 	// For multiple sentences, use background generation with goroutines
@@ -370,6 +498,7 @@ func streamingTTS(cfg *Config, text string, cacheEnabled bool) error {
 		// Generate first sentence immediately and send to play channel
 		debugLog(cfg, "Generating audio for sentence 1: \"%s\"", sentences[0])
 		audioData, err := generateAudio(cfg, sentences[0], cacheEnabled)
+		debugLog(cfg, "Generated audio for sentence 1: \"%s\"", sentences[0])
 		format := "wav"
 		if cfg.Source == "cloud" {
 			format = "mp3"
@@ -431,17 +560,15 @@ func streamingTTS(cfg *Config, text string, cacheEnabled bool) error {
 		}
 
 		if audio.Buffer != nil {
-			if err := playAudio(audio.Buffer, audio.Format); err != nil {
+			if err := playAudio(cfg, audio.Buffer, audio.Format); err != nil {
 				debugLog(cfg, "Error playing audio for sentence %d: %v", audio.Index+1, err)
 			}
 		}
 
-		// Sleep between sentences (except for last one)
-		if audio.Index < len(sentences)-1 {
+		if audio.Index < len(sentences) {
 			time.Sleep(cfg.SleepTime)
 		}
 	}
-
 	return nil
 }
 
@@ -474,6 +601,20 @@ func main() {
 	}()
 
 	cfg := getConfig()
+
+	if cfg.Source == "local" && cfg.UseOto {
+		ctx, err := getOtoContext()
+		if err != nil {
+			fmt.Errorf("failed to get oto context: %v", err)
+			os.Exit(1)
+		}
+		go func() {
+			debugLog(cfg, "Early initialization of oto context...")
+			ctx.NewPlayer(bytes.NewReader(make([]byte, 255))) // Early initialization oto context
+			debugLog(cfg, "Oto context initialized.")
+		}()
+	}
+
 	cacheEnabled := false
 	var message string
 
