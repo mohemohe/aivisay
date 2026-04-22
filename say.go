@@ -167,12 +167,34 @@ func playAudioWithOto(audioData []byte) error {
 		pcmData = pcmData[:header.DataSize]
 	}
 
+	// Pre-compute expected duration of the PCM data so we can wait for the
+	// hardware buffer to fully drain after IsPlaying() returns false.
+	bytesPerSample := int64(header.NumChannels) * int64(header.BitsPerSample/8)
+	bytesPerSecond := int64(header.SampleRate) * bytesPerSample
+	var expectedDuration time.Duration
+	if bytesPerSecond > 0 {
+		expectedDuration = time.Duration(int64(len(pcmData)) * int64(time.Second) / bytesPerSecond)
+	}
+
 	player := ctx.NewPlayer(bytes.NewReader(pcmData))
 
+	startTime := time.Now()
 	player.Play()
 
 	for player.IsPlaying() {
 		time.Sleep(time.Millisecond)
+	}
+
+	// oto's IsPlaying() returns false as soon as the player's internal buffer
+	// is drained into the audio hardware queue, but the hardware may still
+	// have queued audio that hasn't been played yet (e.g. up to ~278ms on
+	// darwin with 4x12288-byte float32 buffers). Wait until the expected
+	// playback duration has elapsed, plus a safety margin, so the last
+	// portion of the audio is actually heard before we return.
+	const drainMargin = 200 * time.Millisecond
+	target := expectedDuration + drainMargin
+	if elapsed := time.Since(startTime); elapsed < target {
+		time.Sleep(target - elapsed)
 	}
 
 	return nil
@@ -565,7 +587,7 @@ func streamingTTS(cfg *Config, text string, cacheEnabled bool) error {
 			}
 		}
 
-		if audio.Index < len(sentences) {
+		if audio.Index < len(sentences)-1 {
 			time.Sleep(cfg.SleepTime)
 		}
 	}
